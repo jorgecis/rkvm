@@ -19,6 +19,9 @@ zbus = { version = "4", features = ["tokio"] }
 # VNC / frame encoding
 vnc-rs = "0.5"          # o vncserver = "0.2" si prefieres libvncserver
 
+# Command line parsing
+clap = { version = "4.0", features = ["derive"] }
+
 # Utilidades
 bytes = "1"
 image = "0.25"
