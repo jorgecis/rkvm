@@ -6,9 +6,6 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use anyhow::Result;
 
-#[cfg(target_os = "linux")]
-use v4l::video::Capture;
-
 /// Video capture mode detected or forced
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Used on Linux only
