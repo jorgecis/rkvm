@@ -9,9 +9,13 @@ use clap::Parser;
 #[command(name = "kvm-rs")]
 #[command(about = "Minimal KVM-IP server for OpenBMC")]
 pub struct Args {
-    /// Video device path (V4L2 video device)
+    /// Video device path (V4L2 video device or framebuffer)
     #[arg(short = 'v', long = "video", default_value = "/dev/video0")]
     pub video_device: String,
+
+    /// Force framebuffer mode instead of auto-detection
+    #[arg(long = "force-framebuffer")]
+    pub force_framebuffer: bool,
 
     /// HID gadget device for keyboard input
     #[arg(short = 'k', long = "keyboard-hid", default_value = "/dev/hidg0")]
@@ -52,6 +56,11 @@ impl Args {
     pub fn print_config(&self) {
         println!("KVM‑RS starting with:");
         println!("  Video device: {}", self.video_device);
+        if self.force_framebuffer {
+            println!("  Video mode: Framebuffer (forced)");
+        } else {
+            println!("  Video mode: Auto-detect (V4L2 preferred, framebuffer fallback)");
+        }
         println!("  Keyboard HID: {}", self.keyboard_hid);
         println!("  Mouse HID: {}", self.mouse_hid);
         println!("  WebSocket listening on: {}:{}", self.bind_address, self.port);

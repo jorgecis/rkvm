@@ -1,15 +1,30 @@
 # KVM-RS: Minimal KVM-IP Server for OpenBMC
 
-A lightweight KVM over IP server designed for OpenBMC systems, providing remote console access via WebSocket connections.
+A lightweight KVM over IP server designed for OpenBMC systems, providing remote console access via WebSocket connections with support for both V4L2 video capture and framebuffer devices.
 
 ## Features
 
-- Framebuffer streaming from video devices
+- **Dual video capture support**: V4L2 devices (USB cameras, HDMI capture cards) and framebuffer devices
+- **Auto-detection**: Automatically detects the best available video source with intelligent fallback
 - HID gadget support for keyboard and mouse input
 - WebSocket-based communication for web clients
 - **VNC server for noVNC client connections**
 - Configurable device paths and network settings
 - DBus integration for session validation
+
+## Video Source Support
+
+### V4L2 Devices (Preferred)
+- USB cameras (`/dev/video0`, `/dev/video1`, etc.)
+- HDMI/DVI capture cards
+- Other V4L2-compatible video sources
+- Supports MJPEG and YUYV formats
+- Automatic format detection and fallback
+
+### Framebuffer Devices (Fallback)
+- Direct framebuffer access (`/dev/fb0`, `/dev/fb1`, etc.)
+- Automatic resolution and format detection
+- Suitable for systems without V4L2 devices
 
 ## Build
 
@@ -31,7 +46,8 @@ kvm-rs [OPTIONS]
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--video <DEVICE>` | `-v` | `/dev/fb0` | Video device path (framebuffer) |
+| `--video <DEVICE>` | `-v` | `/dev/video0` | Video device path (V4L2 or framebuffer) |
+| `--force-framebuffer` | - | - | Force framebuffer mode, skip V4L2 detection |
 | `--keyboard-hid <DEVICE>` | `-k` | `/dev/hidg0` | HID gadget device for keyboard input |
 | `--mouse-hid <DEVICE>` | `-m` | `/dev/hidg1` | HID gadget device for mouse input |
 | `--port <PORT>` | `-p` | `8443` | Port to listen on (WebSocket) |
@@ -42,11 +58,17 @@ kvm-rs [OPTIONS]
 ### Examples
 
 ```bash
-# Run with default settings (WebSocket on 8443, VNC on 5900)
+# Run with default settings (auto-detect video source, WebSocket on 8443, VNC on 5900)
 kvm-rs
 
-# Use custom video device and HID devices
-kvm-rs --video /dev/fb1 --keyboard-hid /dev/hidg2 --mouse-hid /dev/hidg3
+# Use V4L2 video capture (USB camera/HDMI capture card)
+kvm-rs --video /dev/video0
+
+# Force framebuffer mode
+kvm-rs --video /dev/fb0 --force-framebuffer
+
+# Use custom devices
+kvm-rs --video /dev/video1 --keyboard-hid /dev/hidg2 --mouse-hid /dev/hidg3
 
 # Run on different ports
 kvm-rs --port 9000 --vnc-port 5901

@@ -13,6 +13,7 @@ mod websocket;
 
 use axum::{routing::get, Router};
 use clap::Parser;
+#[cfg(target_os = "linux")]
 use zbus::Connection;
 
 use args::Args;
@@ -30,13 +31,21 @@ async fn main() -> anyhow::Result<()> {
     args.print_config();
     args.validate_devices();
 
-    // 1. Conecta a DBus para verificar sesión válida (Redfish)
-    let _dbus: Connection = Connection::system().await?;
+    // 1. Conecta a DBus para verificar sesión válida (Redfish) - optional for development
+    #[cfg(target_os = "linux")]
+    {
+        let _dbus: Connection = Connection::system().await?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        println!("Note: D-Bus connection skipped on non-Linux systems");
+    }
 
     // 2. Framebuffer broadcaster
     let hub = DisplayHub::new();
     let video_device = args.video_device.clone();
-    tokio::spawn(hub.clone().spawn(video_device));
+    let force_framebuffer = args.force_framebuffer;
+    tokio::spawn(hub.clone().spawn(video_device, force_framebuffer));
 
     // 3. HID manager
     let hid_manager = HidManager::new(args.keyboard_hid.clone(), args.mouse_hid.clone());
