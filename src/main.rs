@@ -50,8 +50,18 @@ async fn main() -> anyhow::Result<()> {
     // 3. HID manager
     let hid_manager = HidManager::new(args.keyboard_hid.clone(), args.mouse_hid.clone());
 
-    // 4. VNC server
-    let vnc_handler = VncHandler::new(hub.clone(), hid_manager.clone());
+    // 4. VNC server with optional TLS encryption
+    let vnc_handler = if args.vnc_tls {
+        VncHandler::new_with_tls(
+            hub.clone(), 
+            hid_manager.clone(), 
+            args.vnc_cert.clone(), 
+            args.vnc_key.clone()
+        ).await?
+    } else {
+        VncHandler::new(hub.clone(), hid_manager.clone())
+    };
+    
     let vnc_bind_addr = args.bind_address.clone();
     let vnc_port = args.vnc_port;
     tokio::spawn(async move {

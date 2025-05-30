@@ -33,6 +33,18 @@ pub struct Args {
     #[arg(long = "vnc-port", default_value = "5900")]
     pub vnc_port: u16,
 
+    /// Enable TLS encryption for VNC server
+    #[arg(long = "vnc-tls")]
+    pub vnc_tls: bool,
+
+    /// TLS certificate file path (PEM format)
+    #[arg(long = "vnc-cert")]
+    pub vnc_cert: Option<String>,
+
+    /// TLS private key file path (PEM format)
+    #[arg(long = "vnc-key")]
+    pub vnc_key: Option<String>,
+
     /// Bind address
     #[arg(short = 'b', long = "bind", default_value = "0.0.0.0")]
     pub bind_address: String,
@@ -64,6 +76,21 @@ impl Args {
         println!("  Keyboard HID: {}", self.keyboard_hid);
         println!("  Mouse HID: {}", self.mouse_hid);
         println!("  WebSocket listening on: {}:{}", self.bind_address, self.port);
-        println!("  VNC listening on: {}:{}", self.bind_address, self.vnc_port);
+        
+        if self.vnc_tls {
+            println!("  VNC listening on: {}:{} (TLS encrypted)", self.bind_address, self.vnc_port);
+            if let Some(ref cert) = self.vnc_cert {
+                println!("    TLS certificate: {}", cert);
+            } else {
+                println!("    TLS certificate: Self-signed (auto-generated)");
+            }
+            if let Some(ref key) = self.vnc_key {
+                println!("    TLS private key: {}", key);
+            } else {
+                println!("    TLS private key: Auto-generated");
+            }
+        } else {
+            println!("  VNC listening on: {}:{} (unencrypted)", self.bind_address, self.vnc_port);
+        }
     }
 }

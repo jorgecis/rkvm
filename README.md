@@ -8,7 +8,9 @@ A lightweight KVM over IP server designed for OpenBMC systems, providing remote 
 - **Auto-detection**: Automatically detects the best available video source with intelligent fallback
 - HID gadget support for keyboard and mouse input
 - WebSocket-based communication for web clients
-- **VNC server for noVNC client connections**
+- **VNC server with TLS encryption support** for secure noVNC client connections
+- **Configurable encryption**: Support for both encrypted (TLS) and unencrypted VNC connections
+- **Self-signed certificates**: Automatic generation of TLS certificates or use custom certificates
 - Configurable device paths and network settings
 - DBus integration for session validation
 
@@ -52,6 +54,9 @@ kvm-rs [OPTIONS]
 | `--mouse-hid <DEVICE>` | `-m` | `/dev/hidg1` | HID gadget device for mouse input |
 | `--port <PORT>` | `-p` | `8443` | Port to listen on (WebSocket) |
 | `--vnc-port <PORT>` | - | `5900` | VNC server port |
+| `--vnc-tls` | - | - | Enable TLS encryption for VNC server |
+| `--vnc-cert <FILE>` | - | - | TLS certificate file path (PEM format) |
+| `--vnc-key <FILE>` | - | - | TLS private key file path (PEM format) |
 | `--bind <ADDRESS>` | `-b` | `0.0.0.0` | Bind address |
 | `--help` | `-h` | - | Print help information |
 
@@ -67,17 +72,23 @@ kvm-rs --video /dev/video0
 # Force framebuffer mode
 kvm-rs --video /dev/fb0 --force-framebuffer
 
+# Enable TLS encryption for VNC with auto-generated self-signed certificate
+kvm-rs --vnc-tls
+
+# Enable TLS encryption with custom certificate and key files
+kvm-rs --vnc-tls --vnc-cert /path/to/cert.pem --vnc-key /path/to/key.pem
+
 # Use custom devices
 kvm-rs --video /dev/video1 --keyboard-hid /dev/hidg2 --mouse-hid /dev/hidg3
 
-# Run on different ports
-kvm-rs --port 9000 --vnc-port 5901
+# Run on different ports with TLS
+kvm-rs --port 9000 --vnc-port 5901 --vnc-tls
 
-# Custom bind address
-kvm-rs --bind 127.0.0.1
+# Custom bind address with TLS encryption
+kvm-rs --bind 127.0.0.1 --vnc-tls
 
-# Combine multiple options
-kvm-rs -v /dev/fb0 -k /dev/hidg0 -m /dev/hidg1 -p 8443 --vnc-port 5900 -b 0.0.0.0
+# Combine multiple options with TLS
+kvm-rs -v /dev/fb0 -k /dev/hidg0 -m /dev/hidg1 -p 8443 --vnc-port 5900 --vnc-tls -b 0.0.0.0
 ```
 
 ## WebSocket Endpoint
