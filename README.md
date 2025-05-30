@@ -6,7 +6,8 @@ A lightweight KVM over IP server designed for OpenBMC systems, providing remote 
 
 - Framebuffer streaming from video devices
 - HID gadget support for keyboard and mouse input
-- WebSocket-based communication
+- WebSocket-based communication for web clients
+- **VNC server for noVNC client connections**
 - Configurable device paths and network settings
 - DBus integration for session validation
 
@@ -33,36 +34,51 @@ kvm-rs [OPTIONS]
 | `--video <DEVICE>` | `-v` | `/dev/fb0` | Video device path (framebuffer) |
 | `--keyboard-hid <DEVICE>` | `-k` | `/dev/hidg0` | HID gadget device for keyboard input |
 | `--mouse-hid <DEVICE>` | `-m` | `/dev/hidg1` | HID gadget device for mouse input |
-| `--port <PORT>` | `-p` | `8443` | Port to listen on |
+| `--port <PORT>` | `-p` | `8443` | Port to listen on (WebSocket) |
+| `--vnc-port <PORT>` | - | `5900` | VNC server port |
 | `--bind <ADDRESS>` | `-b` | `0.0.0.0` | Bind address |
 | `--help` | `-h` | - | Print help information |
 
 ### Examples
 
 ```bash
-# Run with default settings
+# Run with default settings (WebSocket on 8443, VNC on 5900)
 kvm-rs
 
 # Use custom video device and HID devices
 kvm-rs --video /dev/fb1 --keyboard-hid /dev/hidg2 --mouse-hid /dev/hidg3
 
-# Run on a different port and bind address
-kvm-rs --port 9000 --bind 127.0.0.1
+# Run on different ports
+kvm-rs --port 9000 --vnc-port 5901
+
+# Custom bind address
+kvm-rs --bind 127.0.0.1
 
 # Combine multiple options
-kvm-rs -v /dev/fb0 -k /dev/hidg0 -m /dev/hidg1 -p 8443 -b 0.0.0.0
+kvm-rs -v /dev/fb0 -k /dev/hidg0 -m /dev/hidg1 -p 8443 --vnc-port 5900 -b 0.0.0.0
 ```
 
 ## WebSocket Endpoint
 
 The server exposes a WebSocket endpoint at `/kvm/0` for KVM connections.
 
+## VNC Server
+
+The server also runs a VNC server on port 5900 (configurable with `--vnc-port`) that is compatible with noVNC clients.
+
 ### Protocol
 
+#### WebSocket Protocol
 - **Video Output**: Framebuffer data is broadcast as binary messages to connected clients
 - **Input Handling**: Binary messages from clients are interpreted as HID input:
   - Byte 0 = `0x01`: Keyboard input (remaining bytes sent to keyboard HID device)
   - Byte 0 = `0x02`: Mouse input (remaining bytes sent to mouse HID device)
+
+#### VNC Protocol
+- **RFB 3.8**: Standard VNC protocol implementation
+- **Security**: No authentication (for simplicity in OpenBMC environments)
+- **Encoding**: Raw pixel format (32-bit RGBA, 1920x1080)
+- **Input**: Standard VNC keyboard and pointer events converted to HID reports
 
 ## System Requirements
 
@@ -98,6 +114,34 @@ echo "udc_name" > UDC
 ### Framebuffer
 
 Ensure the framebuffer device is accessible and provides the expected format (RGBA 1920x1080).
+
+## Connecting with noVNC
+
+You can connect to the KVM server using noVNC clients:
+
+### Using noVNC Web Client
+
+1. Deploy noVNC on a web server
+2. Connect to: `vnc://your-openbmc-ip:5900`
+3. No password required (authentication disabled for OpenBMC environments)
+
+### Using VNC Viewer
+
+Any standard VNC client can connect:
+```bash
+# Using vncviewer
+vncviewer your-openbmc-ip:5900
+
+# Using TigerVNC
+vncviewer your-openbmc-ip::5900
+```
+
+### WebSocket Connection
+
+For web-based clients, connect to:
+```
+ws://your-openbmc-ip:8443/kvm/0
+```
 
 ## Development
 
