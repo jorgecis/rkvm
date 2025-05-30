@@ -6,6 +6,9 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use anyhow::Result;
 
+#[cfg(target_os = "linux")]
+use v4l::video::Capture;
+
 /// Video capture mode detected or forced
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Used on Linux only
@@ -24,6 +27,19 @@ impl DisplayHub {
     pub fn new() -> Arc<Self> {
         let (tx, _rx) = broadcast::channel(16);
         Arc::new(Self { tx })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn get_device_index_from_path(path: &str) -> usize {
+        // Extract device number from paths like "/dev/video0", "/dev/video1", etc.
+        if path.starts_with("/dev/video") {
+            // Try to extract the number after "video"
+            let number_part = path.trim_start_matches("/dev/video");
+            number_part.parse().unwrap_or(0)
+        } else {
+            // Default to device 0 if we can't parse
+            0
+        }
     }
 
     pub async fn spawn(self: Arc<Self>, video_device_path: String, force_framebuffer: bool) -> Result<()> {
@@ -58,7 +74,8 @@ impl DisplayHub {
         if video_device_path.starts_with("/dev/video") {
             if Path::new(video_device_path).exists() {
                 // Try to open as V4L2 device
-                if let Ok(_) = v4l::Device::new(video_device_path) {
+                let device_index = Self::get_device_index_from_path(video_device_path);
+                if let Ok(_) = v4l::Device::new(device_index) {
                     return CaptureMode::V4L2;
                 }
             }
@@ -84,7 +101,8 @@ impl DisplayHub {
         if Path::new(video_device_path).exists() {
             // If it contains "video", assume V4L2
             if video_device_path.contains("video") {
-                if let Ok(_) = v4l::Device::new(video_device_path) {
+                let device_index = Self::get_device_index_from_path(video_device_path);
+                if let Ok(_) = v4l::Device::new(device_index) {
                     return CaptureMode::V4L2;
                 }
             }
@@ -109,8 +127,9 @@ impl DisplayHub {
         println!("Starting V4L2 capture from: {}", video_device_path);
 
         // Open V4L2 device
-        let dev = Device::new(&video_device_path)
-            .with_context(|| format!("Failed to open V4L2 device: {}", video_device_path))?;
+        let device_index = Self::get_device_index_from_path(&video_device_path);
+        let dev = Device::new(device_index)
+            .with_context(|| format!("Failed to open V4L2 device: {} (index: {})", video_device_path, device_index))?;
 
         println!("Opened V4L2 device: {}", video_device_path);
 
@@ -121,7 +140,7 @@ impl DisplayHub {
         println!("Device capabilities: {}", caps);
 
         // Set format - try common formats
-        let mut fmt = dev.format()
+        let mut fmt = v4l::video::Capture::format(&dev)
             .context("Failed to get current format")?;
         
         // Try to set a common format - MJPEG first, then YUYV
@@ -129,7 +148,7 @@ impl DisplayHub {
         fmt.width = 1920;
         fmt.height = 1080;
         
-        let fmt = match dev.set_format(&fmt) {
+        let fmt = match v4l::video::Capture::set_format(&dev, &fmt) {
             Ok(f) => {
                 println!("Set format to MJPEG {}x{}", f.width, f.height);
                 f
@@ -139,7 +158,7 @@ impl DisplayHub {
                 fmt.fourcc = FourCC::new(b"YUYV");
                 fmt.width = 1920;
                 fmt.height = 1080;
-                let f = dev.set_format(&fmt)
+                let f = v4l::video::Capture::set_format(&dev, &fmt)
                     .context("Failed to set video format (tried MJPEG and YUYV)")?;
                 println!("Set format to YUYV {}x{}", f.width, f.height);
                 f
@@ -147,10 +166,10 @@ impl DisplayHub {
         };
 
         // Set frame rate
-        let mut params = dev.params()
+        let mut params = v4l::video::Capture::params(&dev)
             .context("Failed to get stream parameters")?;
         params.interval = v4l::Fraction::new(1, 30); // 30 FPS
-        dev.set_params(&params)
+        v4l::video::Capture::set_params(&dev, &params)
             .context("Failed to set frame rate")?;
 
         println!("Set frame rate to 30 FPS");
@@ -167,7 +186,7 @@ impl DisplayHub {
                 .context("Failed to capture frame")?;
             
             // Convert frame data to Vec<u8> for broadcasting
-            let frame_data = match fmt.fourcc.repr {
+            let frame_data = match &fmt.fourcc.repr {
                 b"MJPG" => {
                     // MJPEG data can be used directly
                     buf.to_vec()
