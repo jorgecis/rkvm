@@ -5,24 +5,26 @@ edition = "2021"
 
 [dependencies]
 # Async runtime & networking
-tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "signal", "fs"] }
 axum  = { version = "0.8.4", features = ["ws"] }
 tokio-tungstenite = "0.23"
 futures-util = "0.3"
 hyper = "1"
-# v4l                = { version = "0.15", default-features = false, features = ["tokio"] }
-# mjpeg-writer       = "0.2"     # te genera headers correctamente para MJPEG
 
 # DBus
 zbus = { version = "4", features = ["tokio"] }
 
 # VNC / frame encoding
-vnc-rs = "0.5"          # o vncserver = "0.2" si prefieres libvncserver
+vnc-rs = "0.5"
 
 # Command line parsing
 clap = { version = "4.0", features = ["derive"] }
 
-# Utilidades
+# Utilities
 bytes = "1"
 image = "0.25"
 anyhow = "1.0"
+
+# V4L2 support (Linux only)
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = "0.14"

@@ -9,8 +9,8 @@ use clap::Parser;
 #[command(name = "kvm-rs")]
 #[command(about = "Minimal KVM-IP server for OpenBMC")]
 pub struct Args {
-    /// Video device path (framebuffer)
-    #[arg(short = 'v', long = "video", default_value = "/dev/fb0")]
+    /// Video device path (V4L2 video device)
+    #[arg(short = 'v', long = "video", default_value = "/dev/video0")]
     pub video_device: String,
 
     /// HID gadget device for keyboard input
