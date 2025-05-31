@@ -3,14 +3,19 @@
 // VNC server implementation for kvm-rs with TLS encryption support
 
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use crate::{display::DisplayHub, hid::HidManager};
 use anyhow::{Result, Context};
 
 /// VNC Server handler for noVNC clients with TLS encryption
+#[derive(Clone)]
 pub struct VncHandler {
     hub: Arc<DisplayHub>,
     hid_manager: HidManager,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    last_frame: Arc<RwLock<Option<Vec<u8>>>>,
+    frame_width: Arc<RwLock<u16>>,
+    frame_height: Arc<RwLock<u16>>,
 }
 
 impl VncHandler {
@@ -19,6 +24,9 @@ impl VncHandler {
             hub,
             hid_manager,
             tls_acceptor: None,
+            last_frame: Arc::new(RwLock::new(None)),
+            frame_width: Arc::new(RwLock::new(1920)),
+            frame_height: Arc::new(RwLock::new(1080)),
         }
     }
 
@@ -34,6 +42,9 @@ impl VncHandler {
             hub,
             hid_manager,
             tls_acceptor,
+            last_frame: Arc::new(RwLock::new(None)),
+            frame_width: Arc::new(RwLock::new(1920)),
+            frame_height: Arc::new(RwLock::new(1080)),
         })
     }
 
@@ -108,6 +119,12 @@ impl VncHandler {
     pub async fn start_vnc_server(self, bind_addr: String, port: u16) -> Result<()> {
         use tokio::net::TcpListener;
         
+        // Start frame processing task
+        let frame_processor = self.clone();
+        tokio::spawn(async move {
+            frame_processor.process_frames().await;
+        });
+        
         let listener = TcpListener::bind(format!("{}:{}", bind_addr, port)).await
             .with_context(|| format!("Failed to bind VNC server to {}:{}", bind_addr, port))?;
         
@@ -120,16 +137,14 @@ impl VncHandler {
         while let Ok((stream, addr)) = listener.accept().await {
             println!("VNC client connected from: {}", addr);
             
-            let hub = self.hub.clone();
-            let hid_manager = self.hid_manager.clone();
-            let tls_acceptor = self.tls_acceptor.clone();
+            let handler = self.clone();
             
             tokio::spawn(async move {
-                let result = if let Some(tls_acceptor) = tls_acceptor {
+                let result = if let Some(ref tls_acceptor) = handler.tls_acceptor {
                     // Handle TLS connection
                     match tls_acceptor.accept(stream).await {
                         Ok(tls_stream) => {
-                            Self::handle_vnc_client_tls(tls_stream, hub, hid_manager).await
+                            handler.handle_vnc_client_tls(tls_stream).await
                         }
                         Err(e) => {
                             eprintln!("TLS handshake failed for {}: {}", addr, e);
@@ -138,7 +153,7 @@ impl VncHandler {
                     }
                 } else {
                     // Handle plain TCP connection
-                    Self::handle_vnc_client_tcp(stream, hub, hid_manager).await
+                    handler.handle_vnc_client_tcp(stream).await
                 };
 
                 if let Err(e) = result {
@@ -150,10 +165,101 @@ impl VncHandler {
         Ok(())
     }
 
+    async fn process_frames(&self) {
+        let mut rx = self.hub.tx.subscribe();
+        
+        while let Ok(frame_data) = rx.recv().await {
+            // Convert frame data to RGB format for VNC
+            let rgb_data = self.convert_frame_to_rgb(&frame_data).await;
+            
+            // Update last frame
+            *self.last_frame.write().await = Some(rgb_data);
+            
+            // Update frame dimensions if needed (detect from frame data)
+            // For now, assume the frame is already in the right format
+        }
+    }
+
+    async fn convert_frame_to_rgb(&self, frame_data: &[u8]) -> Vec<u8> {
+        // Try to detect frame format and convert to RGB
+        // For now, assume it's already RGB or MJPEG
+        
+        // Check if it looks like MJPEG (starts with FF D8)
+        if frame_data.len() > 2 && frame_data[0] == 0xFF && frame_data[1] == 0xD8 {
+            // MJPEG data - decode to RGB
+            if let Ok(img) = image::load_from_memory_with_format(frame_data, image::ImageFormat::Jpeg) {
+                let rgb_img = img.to_rgb8();
+                let (width, height) = rgb_img.dimensions();
+                
+                // Update dimensions
+                *self.frame_width.write().await = width as u16;
+                *self.frame_height.write().await = height as u16;
+                
+                println!("Decoded MJPEG frame: {}x{}", width, height);
+                return rgb_img.into_raw();
+            }
+        }
+        
+        // Check if it might be YUYV (specific size patterns)
+        let pixel_count = frame_data.len() / 2; // YUYV is 2 bytes per pixel
+        let width_height_pairs = [
+            (1920, 1080), (1280, 720), (640, 480), (320, 240)
+        ];
+        
+        for (w, h) in width_height_pairs {
+            if pixel_count == w * h {
+                // Looks like YUYV with these dimensions
+                println!("Converting YUYV frame: {}x{}", w, h);
+                *self.frame_width.write().await = w as u16;
+                *self.frame_height.write().await = h as u16;
+                return self.convert_yuyv_to_rgb(frame_data, w, h);
+            }
+        }
+        
+        // Check if it might be RGB (3 bytes per pixel)
+        let rgb_pixel_count = frame_data.len() / 3;
+        for (w, h) in width_height_pairs {
+            if rgb_pixel_count == w * h {
+                // Already RGB
+                println!("Using RGB frame: {}x{}", w, h);
+                *self.frame_width.write().await = w as u16;
+                *self.frame_height.write().await = h as u16;
+                return frame_data.to_vec();
+            }
+        }
+        
+        // Default: assume it's RGB data, use default dimensions
+        frame_data.to_vec()
+    }
+
+    fn convert_yuyv_to_rgb(&self, yuyv_data: &[u8], width: usize, height: usize) -> Vec<u8> {
+        let mut rgb_data = Vec::with_capacity(width * height * 3);
+        
+        for chunk in yuyv_data.chunks_exact(4) {
+            let y1 = chunk[0] as i32;
+            let u = chunk[1] as i32 - 128;
+            let y2 = chunk[2] as i32;
+            let v = chunk[3] as i32 - 128;
+            
+            // Convert first pixel (Y1, U, V)
+            let r1 = ((y1 + (1.402 * v as f32) as i32).max(0).min(255)) as u8;
+            let g1 = ((y1 - (0.344 * u as f32) as i32 - (0.714 * v as f32) as i32).max(0).min(255)) as u8;
+            let b1 = ((y1 + (1.772 * u as f32) as i32).max(0).min(255)) as u8;
+            
+            // Convert second pixel (Y2, U, V)
+            let r2 = ((y2 + (1.402 * v as f32) as i32).max(0).min(255)) as u8;
+            let g2 = ((y2 - (0.344 * u as f32) as i32 - (0.714 * v as f32) as i32).max(0).min(255)) as u8;
+            let b2 = ((y2 + (1.772 * u as f32) as i32).max(0).min(255)) as u8;
+            
+            rgb_data.extend_from_slice(&[r1, g1, b1, r2, g2, b2]);
+        }
+        
+        rgb_data
+    }
+
     async fn handle_vnc_client_tls(
+        &self,
         mut stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-        hub: Arc<DisplayHub>,
-        hid_manager: HidManager,
     ) -> Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -183,19 +289,18 @@ impl VncHandler {
         stream.read_exact(&mut client_init).await?;
 
         // Send ServerInit
-        let server_init = Self::create_server_init();
+        let server_init = self.create_server_init().await;
         stream.write_all(&server_init).await?;
 
         // Start framebuffer updates and input handling
-        Self::handle_vnc_session_tls(stream, hub, hid_manager).await?;
+        self.handle_vnc_session_tls(stream).await?;
 
         Ok(())
     }
 
     async fn handle_vnc_client_tcp(
+        &self,
         mut stream: tokio::net::TcpStream,
-        hub: Arc<DisplayHub>,
-        hid_manager: HidManager,
     ) -> Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -225,25 +330,28 @@ impl VncHandler {
         stream.read_exact(&mut client_init).await?;
 
         // Send ServerInit
-        let server_init = Self::create_server_init();
+        let server_init = self.create_server_init().await;
         stream.write_all(&server_init).await?;
 
         // Start framebuffer updates and input handling
-        Self::handle_vnc_session_tcp(stream, hub, hid_manager).await?;
+        self.handle_vnc_session_tcp(stream).await?;
 
         Ok(())
     }
 
-    fn create_server_init() -> Vec<u8> {
+    async fn create_server_init(&self) -> Vec<u8> {
+        let width = *self.frame_width.read().await;
+        let height = *self.frame_height.read().await;
+        
         let mut init = Vec::new();
         
-        // Framebuffer width (1920) - big endian
-        init.extend_from_slice(&1920u16.to_be_bytes());
-        // Framebuffer height (1080) - big endian  
-        init.extend_from_slice(&1080u16.to_be_bytes());
+        // Framebuffer width - big endian
+        init.extend_from_slice(&width.to_be_bytes());
+        // Framebuffer height - big endian  
+        init.extend_from_slice(&height.to_be_bytes());
         
-        // Pixel format (32-bit RGBA)
-        init.push(32); // bits per pixel
+        // Pixel format (24-bit RGB)
+        init.push(24); // bits per pixel
         init.push(24); // depth
         init.push(0);  // big endian flag (0 = little endian)
         init.push(1);  // true color flag
@@ -260,28 +368,31 @@ impl VncHandler {
         init.extend_from_slice(&(name.len() as u32).to_be_bytes());
         init.extend_from_slice(name);
         
+        println!("Sent ServerInit: {}x{} RGB24", width, height);
         init
     }
 
     async fn handle_vnc_session_tls(
+        &self,
         mut stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-        hub: Arc<DisplayHub>,
-        hid_manager: HidManager,
     ) -> Result<()> {
         use tokio::io::AsyncReadExt;
         
-        let mut rx = hub.tx.subscribe();
+        let mut rx = self.hub.tx.subscribe();
         let mut buffer = [0u8; 1024];
         
         loop {
             tokio::select! {
-                // Send framebuffer updates
+                // Send framebuffer updates when new frames arrive
                 frame_result = rx.recv() => {
                     match frame_result {
-                        Ok(frame_data) => {
-                            if let Err(e) = Self::send_framebuffer_update_tls(&mut stream, &frame_data).await {
-                                eprintln!("Failed to send framebuffer update (TLS): {}", e);
-                                break;
+                        Ok(_) => {
+                            // Frame is already processed by process_frames task
+                            if let Some(ref frame_data) = *self.last_frame.read().await {
+                                if let Err(e) = self.send_framebuffer_update_tls(&mut stream, frame_data).await {
+                                    eprintln!("Failed to send framebuffer update (TLS): {}", e);
+                                    break;
+                                }
                             }
                         }
                         Err(_) => break,
@@ -293,7 +404,7 @@ impl VncHandler {
                     match read_result {
                         Ok(0) => break, // Connection closed
                         Ok(n) => {
-                            if let Err(e) = Self::process_vnc_message(&buffer[..n], &hid_manager).await {
+                            if let Err(e) = self.process_vnc_message(&buffer[..n], &mut stream).await {
                                 eprintln!("VNC message processing error (TLS): {}", e);
                                 break;
                             }
@@ -311,24 +422,26 @@ impl VncHandler {
     }
 
     async fn handle_vnc_session_tcp(
+        &self,
         mut stream: tokio::net::TcpStream,
-        hub: Arc<DisplayHub>,
-        hid_manager: HidManager,
     ) -> Result<()> {
         use tokio::io::AsyncReadExt;
         
-        let mut rx = hub.tx.subscribe();
+        let mut rx = self.hub.tx.subscribe();
         let mut buffer = [0u8; 1024];
         
         loop {
             tokio::select! {
-                // Send framebuffer updates
+                // Send framebuffer updates when new frames arrive
                 frame_result = rx.recv() => {
                     match frame_result {
-                        Ok(frame_data) => {
-                            if let Err(e) = Self::send_framebuffer_update_tcp(&mut stream, &frame_data).await {
-                                eprintln!("Failed to send framebuffer update: {}", e);
-                                break;
+                        Ok(_) => {
+                            // Frame is already processed by process_frames task
+                            if let Some(ref frame_data) = *self.last_frame.read().await {
+                                if let Err(e) = self.send_framebuffer_update_tcp(&mut stream, frame_data).await {
+                                    eprintln!("Failed to send framebuffer update: {}", e);
+                                    break;
+                                }
                             }
                         }
                         Err(_) => break,
@@ -340,7 +453,7 @@ impl VncHandler {
                     match read_result {
                         Ok(0) => break, // Connection closed
                         Ok(n) => {
-                            if let Err(e) = Self::process_vnc_message(&buffer[..n], &hid_manager).await {
+                            if let Err(e) = self.process_vnc_message(&buffer[..n], &mut stream).await {
                                 eprintln!("VNC message processing error: {}", e);
                                 break;
                             }
@@ -357,10 +470,14 @@ impl VncHandler {
         Ok(())
     }
 
-    async fn process_vnc_message(
+    async fn process_vnc_message<S>(
+        &self,
         data: &[u8],
-        hid_manager: &HidManager,
-    ) -> Result<()> {
+        stream: &mut S,
+    ) -> Result<()> 
+    where
+        S: tokio::io::AsyncWrite + Unpin,
+    {
         if data.is_empty() {
             return Ok(());
         }
@@ -374,6 +491,33 @@ impl VncHandler {
             }
             3 => { // FramebufferUpdateRequest
                 println!("Received FramebufferUpdateRequest");
+                
+                // Send current framebuffer immediately if we have one
+                if let Some(ref frame_data) = *self.last_frame.read().await {
+                    use tokio::io::AsyncWriteExt;
+                    
+                    let width = *self.frame_width.read().await;
+                    let height = *self.frame_height.read().await;
+                    
+                    // FramebufferUpdate message
+                    let mut update = Vec::new();
+                    update.push(0); // message type
+                    update.push(0); // padding
+                    update.extend_from_slice(&1u16.to_be_bytes()); // number of rectangles
+
+                    // Rectangle header
+                    update.extend_from_slice(&0u16.to_be_bytes()); // x
+                    update.extend_from_slice(&0u16.to_be_bytes()); // y
+                    update.extend_from_slice(&width.to_be_bytes()); // width
+                    update.extend_from_slice(&height.to_be_bytes()); // height
+                    update.extend_from_slice(&0u32.to_be_bytes()); // encoding (Raw)
+
+                    stream.write_all(&update).await?;
+                    stream.write_all(frame_data).await?;
+                    stream.flush().await?;
+                    
+                    println!("Sent immediate framebuffer update: {}x{}, {} bytes", width, height, frame_data.len());
+                }
             }
             4 => { // KeyEvent
                 if data.len() >= 8 {
@@ -383,7 +527,7 @@ impl VncHandler {
                     println!("Key event: key={}, down={}", key, down_flag);
                     
                     if let Some(hid_report) = Self::vnc_key_to_hid(key, down_flag) {
-                        let _ = hid_manager.send_keyboard_input(&hid_report).await;
+                        let _ = self.hid_manager.send_keyboard_input(&hid_report).await;
                     }
                 }
             }
@@ -396,7 +540,7 @@ impl VncHandler {
                     println!("Pointer event: buttons={}, x={}, y={}", button_mask, x, y);
                     
                     let hid_report = Self::vnc_pointer_to_hid(button_mask, x, y);
-                    let _ = hid_manager.send_mouse_input(&hid_report).await;
+                    let _ = self.hid_manager.send_mouse_input(&hid_report).await;
                 }
             }
             6 => { // ClientCutText
@@ -411,10 +555,14 @@ impl VncHandler {
     }
 
     async fn send_framebuffer_update_tls(
+        &self,
         stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
         frame_data: &[u8],
     ) -> Result<()> {
         use tokio::io::AsyncWriteExt;
+
+        let width = *self.frame_width.read().await;
+        let height = *self.frame_height.read().await;
 
         // FramebufferUpdate message
         let mut update = Vec::new();
@@ -425,8 +573,8 @@ impl VncHandler {
         // Rectangle header
         update.extend_from_slice(&0u16.to_be_bytes()); // x
         update.extend_from_slice(&0u16.to_be_bytes()); // y
-        update.extend_from_slice(&1920u16.to_be_bytes()); // width
-        update.extend_from_slice(&1080u16.to_be_bytes()); // height
+        update.extend_from_slice(&width.to_be_bytes()); // width
+        update.extend_from_slice(&height.to_be_bytes()); // height
         update.extend_from_slice(&0u32.to_be_bytes()); // encoding (Raw)
 
         stream.write_all(&update).await?;
@@ -437,10 +585,14 @@ impl VncHandler {
     }
 
     async fn send_framebuffer_update_tcp(
+        &self,
         stream: &mut tokio::net::TcpStream,
         frame_data: &[u8],
     ) -> Result<()> {
         use tokio::io::AsyncWriteExt;
+
+        let width = *self.frame_width.read().await;
+        let height = *self.frame_height.read().await;
 
         // FramebufferUpdate message
         let mut update = Vec::new();
@@ -451,8 +603,8 @@ impl VncHandler {
         // Rectangle header
         update.extend_from_slice(&0u16.to_be_bytes()); // x
         update.extend_from_slice(&0u16.to_be_bytes()); // y
-        update.extend_from_slice(&1920u16.to_be_bytes()); // width
-        update.extend_from_slice(&1080u16.to_be_bytes()); // height
+        update.extend_from_slice(&width.to_be_bytes()); // width
+        update.extend_from_slice(&height.to_be_bytes()); // height
         update.extend_from_slice(&0u32.to_be_bytes()); // encoding (Raw)
 
         stream.write_all(&update).await?;

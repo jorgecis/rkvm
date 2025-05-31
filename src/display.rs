@@ -117,8 +117,7 @@ impl DisplayHub {
 
     #[cfg(target_os = "linux")]
     async fn spawn_v4l2_capture(self: Arc<Self>, video_device_path: String) -> Result<()> {
-        use v4l::prelude::*;
-        use v4l::{buffer::Type, io::traits::CaptureStream, Device, FourCC};
+        use v4l::Device;
         use anyhow::Context;
 
         println!("Starting V4L2 capture from: {}", video_device_path);
@@ -136,76 +135,173 @@ impl DisplayHub {
         
         println!("Device capabilities: {}", caps);
 
-        // Set format - try common formats
-        let mut fmt = v4l::video::Capture::format(&dev)
-            .context("Failed to get current format")?;
-        
-        // Try to set a common format - MJPEG first, then YUYV
-        fmt.fourcc = FourCC::new(b"MJPG");
-        fmt.width = 1920;
-        fmt.height = 1080;
-        
-        let fmt = match v4l::video::Capture::set_format(&dev, &fmt) {
-            Ok(f) => {
-                println!("Set format to MJPEG {}x{}", f.width, f.height);
-                f
-            }
-            Err(_) => {
-                // Fallback to YUYV
-                fmt.fourcc = FourCC::new(b"YUYV");
-                fmt.width = 1920;
-                fmt.height = 1080;
-                let f = v4l::video::Capture::set_format(&dev, &fmt)
-                    .context("Failed to set video format (tried MJPEG and YUYV)")?;
-                println!("Set format to YUYV {}x{}", f.width, f.height);
-                f
-            }
-        };
+        if caps.to_string().contains("Thumbnail") {
+            println!("Detected thumbnail/snapshot device, using read-based capture");
+            self.spawn_v4l2_read_capture(dev, video_device_path).await
+        } else {
+            println!("Getting current format for streaming device...");
+            
+            // Get current format for streaming devices
+            let fmt = match v4l::video::Capture::format(&dev) {
+                Ok(current_fmt) => {
+                    println!("Current format: {:?} {}x{}", 
+                        std::str::from_utf8(&current_fmt.fourcc.repr).unwrap_or("unknown"),
+                        current_fmt.width, current_fmt.height);
+                    current_fmt
+                }
+                Err(e) => {
+                    println!("Failed to get current format: {}", e);
+                    return Err(anyhow::anyhow!("Cannot get format from device: {}", e));
+                }
+            };
 
-        // Set frame rate
-        let mut params = v4l::video::Capture::params(&dev)
-            .context("Failed to get stream parameters")?;
-        params.interval = v4l::Fraction::new(1, 30); // 30 FPS
-        v4l::video::Capture::set_params(&dev, &params)
-            .context("Failed to set frame rate")?;
+            println!("Using format: {:?} {}x{}", 
+                std::str::from_utf8(&fmt.fourcc.repr).unwrap_or("unknown"),
+                fmt.width, fmt.height);
+            
+            println!("Detected streaming device, invoking streaming capture method");
+            self.spawn_v4l2_streaming_capture(dev, fmt).await
+        }
+    }
 
-        println!("Set frame rate to 30 FPS");
+    #[cfg(target_os = "linux")]
+    async fn spawn_v4l2_streaming_capture(self: Arc<Self>, dev: v4l::Device, fmt: v4l::Format) -> Result<()> {
+        use v4l::{buffer::Type, io::traits::CaptureStream};
+        use v4l::prelude::MmapStream;
+        use anyhow::Context;
 
         // Create capture stream
         let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, 4)
             .context("Failed to create mmap stream")?;
 
-        println!("Started V4L2 capture stream");
+        println!("Started V4L2 streaming capture");
+
+        let mut frame_counter = 0u32;
+        let mut last_successful_frame: Option<Vec<u8>> = None;
 
         loop {
-            // Capture frame
-            let (buf, meta) = stream.next()
-                .context("Failed to capture frame")?;
-            
-            // Convert frame data to Vec<u8> for broadcasting
-            let frame_data = match &fmt.fourcc.repr {
-                b"MJPG" => {
-                    // MJPEG data can be used directly
-                    buf.to_vec()
-                }
-                b"YUYV" => {
-                    // For YUYV, we might want to convert to RGB or just pass raw
-                    // For now, just pass the raw YUYV data
-                    buf.to_vec()
-                }
-                _ => {
-                    // For other formats, just pass raw data
-                    buf.to_vec()
-                }
-            };
+            match stream.next() {
+                Ok((buf, meta)) => {
+                    // Convert frame data to Vec<u8> for broadcasting
+                    let frame_data = match &fmt.fourcc.repr {
+                        b"MJPG" => {
+                            // MJPEG data can be used directly
+                            buf.to_vec()
+                        }
+                        b"YUYV" => {
+                            // For YUYV, we might want to convert to RGB or just pass raw
+                            // For now, just pass the raw YUYV data
+                            buf.to_vec()
+                        }
+                        _ => {
+                            // For other formats, just pass raw data
+                            buf.to_vec()
+                        }
+                    };
 
-            // Broadcast frame to all subscribers
-            let _ = self.tx.send(frame_data);
+                    // Store successful frame
+                    last_successful_frame = Some(frame_data.clone());
 
-            // Print some debug info occasionally
-            if meta.sequence % 300 == 0 { // Every 10 seconds at 30fps
-                println!("V4L2: Captured frame {}, size: {} bytes", meta.sequence, buf.len());
+                    // Broadcast frame to all subscribers
+                    let _ = self.tx.send(frame_data);
+
+                    frame_counter += 1;
+                    if frame_counter % 30 == 0 { // Every second at 30fps
+                        println!("V4L2: Captured frame {}, size: {} bytes", meta.sequence, buf.len());
+                    }
+                }
+                Err(e) => {
+                    println!("V4L2 capture error: {}, retrying in 100ms...", e);
+                    
+                    // If we have a last successful frame, broadcast it to keep the stream alive
+                    if let Some(ref frame_data) = last_successful_frame {
+                        let _ = self.tx.send(frame_data.clone());
+                    }
+                    
+                    // Wait before retrying
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    
+                    // Try to recreate the stream if it failed
+                    match MmapStream::with_buffers(&dev, Type::VideoCapture, 4) {
+                        Ok(new_stream) => {
+                            stream = new_stream;
+                            println!("V4L2: Successfully recreated stream");
+                        }
+                        Err(stream_err) => {
+                            println!("V4L2: Failed to recreate stream: {}", stream_err);
+                            // Continue with the old stream and try again next iteration
+                        }
+                    }
+                }
             }
+            
+            // Small delay to prevent excessive CPU usage
+            tokio::time::sleep(std::time::Duration::from_millis(33)).await; // ~30 FPS
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn spawn_v4l2_read_capture(self: Arc<Self>, dev: v4l::Device, video_device_path: String) -> Result<()> {
+        use v4l::{buffer::Type, io::traits::CaptureStream};
+        use v4l::prelude::MmapStream;
+
+        println!("Started V4L2 read-based capture for snapshot device: {}", video_device_path);
+
+        // Try to get device format, but don't fail if we can't
+        if let Ok(fmt) = v4l::video::Capture::format(&dev) {
+            println!("Snapshot device format: {:?} {}x{}", 
+                std::str::from_utf8(&fmt.fourcc.repr).unwrap_or("unknown"),
+                fmt.width, fmt.height);
+        } else {
+            println!("Warning: Could not get format from snapshot device, proceeding anyway");
+        }
+
+        let mut frame_counter = 0u32;
+        let mut last_successful_frame: Option<Vec<u8>> = None;
+
+        loop {
+            // For snapshot devices, create a new stream for each capture attempt
+            match MmapStream::with_buffers(&dev, Type::VideoCapture, 1) {
+                Ok(mut stream) => {
+                    match stream.next() {
+                        Ok((buf, meta)) => {
+                            println!("Snapshot: Captured frame {}, size: {} bytes", meta.sequence, buf.len());
+                            
+                            // Just use the raw buffer data
+                            let frame_data = buf.to_vec();
+
+                            // Store and broadcast the frame
+                            last_successful_frame = Some(frame_data.clone());
+                            match self.tx.send(frame_data) {
+                                Ok(_) => {
+                                    frame_counter += 1;
+                                    if frame_counter % 10 == 0 {
+                                        println!("Snapshot: Successfully captured and broadcasted frame {}", frame_counter);
+                                    }
+                                }
+                                Err(e) => println!("Error broadcasting frame: {}", e),
+                            }
+                        }
+                        Err(e) => {
+                            println!("V4L2 snapshot capture error: {}", e);
+                            // Broadcast last successful frame if available
+                            if let Some(ref frame_data) = last_successful_frame {
+                                let _ = self.tx.send(frame_data.clone());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Error creating snapshot stream: {}", e);
+                    // Broadcast last successful frame if available
+                    if let Some(ref frame_data) = last_successful_frame {
+                        let _ = self.tx.send(frame_data.clone());
+                    }
+                }
+            }
+
+            // Wait between snapshot attempts - snapshot devices don't need high frequency
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await; // 2 FPS for snapshot
         }
     }
 
@@ -376,6 +472,67 @@ impl DisplayHub {
 
             // 30 FPS
             tokio::time::sleep(std::time::Duration::from_millis(33)).await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)] // May be used for different types of thumbnail devices
+    async fn spawn_v4l2_snapshot_capture(self: Arc<Self>, dev: v4l::Device, fmt: v4l::Format) -> Result<()> {
+        use v4l::{buffer::Type, io::traits::CaptureStream};
+        use v4l::prelude::MmapStream;
+
+        println!("Started V4L2 snapshot capture for thumbnail device");
+
+        let mut frame_counter = 0u32;
+        let mut last_successful_frame: Option<Vec<u8>> = None;
+
+        loop {
+            println!("Attempting to create a new stream for snapshot capture...");
+            match MmapStream::with_buffers(&dev, Type::VideoCapture, 1) {
+                Ok(mut stream) => {
+                    println!("Stream created successfully, attempting to capture frame...");
+                    match stream.next() {
+                        Ok((buf, _meta)) => {
+                            println!("Frame captured successfully, size: {} bytes", buf.len());
+                            let frame_data = match &fmt.fourcc.repr {
+                                b"MJPG" => buf.to_vec(),
+                                b"YUYV" => buf.to_vec(),
+                                _ => buf.to_vec(),
+                            };
+
+                            last_successful_frame = Some(frame_data.clone());
+                            let broadcast_result = self.tx.send(frame_data);
+                            match broadcast_result {
+                                Ok(_) => println!("Frame broadcasted successfully"),
+                                Err(e) => println!("Error broadcasting frame: {}", e),
+                            }
+                            frame_counter += 1;
+                            if frame_counter % 30 == 0 {
+                                println!("Snapshot: Captured frame {}, size: {} bytes", frame_counter, buf.len());
+                            }
+                        }
+                        Err(e) => {
+                            println!("Error capturing frame: {}", e);
+                            if let Some(ref frame_data) = last_successful_frame {
+                                let broadcast_result = self.tx.send(frame_data.clone());
+                                match broadcast_result {
+                                    Ok(_) => println!("Last successful frame broadcasted successfully"),
+                                    Err(e) => println!("Error broadcasting last successful frame: {}", e),
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Error creating stream: {}", e);
+                    println!("Device may have stopped. Retrying in 1 second...");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            }
+
+            // Wait between snapshot attempts
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await; // 10 FPS for snapshot
         }
     }
 }

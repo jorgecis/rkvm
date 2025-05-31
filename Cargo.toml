@@ -34,3 +34,9 @@ rcgen = "0.13"
 # V4L2 support (Linux only)
 [target.'cfg(target_os = "linux")'.dependencies]
 v4l = "0.14"
+
+[profile.release]
+opt-level = "z"  # Optimize for size.
+strip = true  # Automatically strip symbols from the binary.
+lto = true
+

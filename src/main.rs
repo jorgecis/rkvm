@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
     // 1. Conecta a DBus para verificar sesión válida (Redfish) - optional for development
     #[cfg(target_os = "linux")]
     {
+        println!("Target OS: Linux, connecting to D-Bus...");
         let _dbus: Connection = Connection::system().await?;
     }
     #[cfg(not(target_os = "linux"))]
